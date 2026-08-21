@@ -1,3 +1,6 @@
 [submodule "repositories/tokentelemetry"]
 	path = repositories/tokentelemetry
 	url = https://github.com/robin-paul/tokentelemetry.git
+[submodule "repositories/tokentelemetry-go"]
+	path = repositories/tokentelemetry-go
+	url = https://github.com/robin-paul/tokentelemetry-go.git
