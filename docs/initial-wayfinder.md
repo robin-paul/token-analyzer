@@ -1,0 +1,1 @@
+I want to analyze `repositories/tokentelemetry` code repository.  The goal would to have a architecture document for an agent to reference for an upcoming new scope of work.  If it would help, the new project would be a complete re-write of tokentelemetry to a single Go application, with a single deployable binary
