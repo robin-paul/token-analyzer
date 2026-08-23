@@ -100,6 +100,15 @@ The Collector CLI watches local transcripts and transmits telemetry to the Hub.
   ./bin/tt watch /path/to/transcripts /another/path/to/logs
   ```
 
+- **Interactive Sessions Browser & Debugger (`tt sessions`)**:
+  ```bash
+  ./bin/tt sessions
+  # or filter by agent harness:
+  ./bin/tt sessions --harness antigravity --limit 10
+  # or static plain-text table:
+  ./bin/tt sessions --plain --limit 5
+  ```
+
 ---
 
 ### C. Stopping Running Processes (`make kill`)
@@ -184,28 +193,67 @@ make kill
 
 ---
 
-### Phase 4: Interactive TUI Dashboard (`tt watch`)
+### Phase 4: Agent Session Debugging & Inspection (`tt sessions`)
+
+- [ ] **Static Session Listing (`--plain`)**:
+  ```bash
+  ./bin/tt sessions --plain --limit 5
+  ```
+  - Confirm output prints a structured CLI table with Session ID, Harness, Model, File Path, Duration, Turn Count, Tokens (In/Out/Cache), and Calculated Cost ($USD).
+- [ ] **Filter by Harness / Agent (`--harness`)**:
+  ```bash
+  ./bin/tt sessions --plain --harness antigravity --limit 3
+  ./bin/tt sessions --plain --harness claude_code --limit 3
+  ```
+  - Verify only sessions matching the specified agent harness are displayed.
+- [ ] **Antigravity Dynamic Model Verification**:
+  ```bash
+  ./bin/tt sessions --plain --harness antigravity --limit 3
+  ```
+  - Verify Antigravity sessions correctly report the active LLM (e.g. `gemini-3.7-flash`, `gemini-3.6-flash`, or `gemini-2.5-pro` based on `<USER_SETTINGS_CHANGE>`) instead of hardcoding to `gemini-2.5-pro`.
+- [ ] **JSON Output for Scripting (`--json`)**:
+  ```bash
+  ./bin/tt sessions --json --limit 2 | jq .
+  ```
+  - Confirm valid, parseable JSON payload containing full session metadata, message turns, token usages, and subagent runs.
+- [ ] **Interactive Standalone Sessions Browser**:
+  ```bash
+  ./bin/tt sessions --harness antigravity
+  ```
+  - Confirm full-screen TUI launches directly into Sessions View mode preloaded with matching sessions.
+
+---
+
+### Phase 5: Interactive TUI Dashboard (`tt watch`)
 
 Launch `./bin/tt watch` in a dedicated terminal window:
 
-- [ ] **Layout & Rendering**:
-  - Header renders machine info, Hub status (`🟢 ONLINE`), active monitoring roots, and current timestamp.
-  - KPI Cards render: `TOTAL COST (USD)`, `TOKENS (IN / OUT / CACHE)`, `CACHE HIT %`, `THROUGHPUT (t/s)`.
-  - Main table displays columns: `TIME`, `AGENT`, `PROJECT`, `MODEL`, `IN / OUT / CACHE`, `COST (USD)`.
-  - Footer displays stream status message and available keybindings.
+- [ ] **Layout & Mode Badges**:
+  - Header renders machine info, Hub status (`🟢 ONLINE`), active monitoring roots, and view mode badge (`⚡ LIVE TURNS` or `📋 SESSIONS VIEW`).
+  - KPI Cards render: `THROUGHPUT (tok/s)`, `CACHE EFFICIENCY (% Hit Rate)`, `ESTIMATED COST ($USD Net/Gross)`.
+  - Main view displays live turn table with columns: `TIME`, `AGENT`, `PROJECT`, `MODEL`, `IN / OUT / CACHE`, `COST (USD)`.
+  - Footer displays stream status message and available interactive keybindings.
 - [ ] **Live Ingestion Feed**:
   - In another terminal, run `./bin/tt send --synthetic`.
   - Verify the turn table updates in real time with newly ingested message turns.
   - Verify total cost, token counters, and rolling throughput calculations update immediately.
+- [ ] **Sessions View & Split-Pane Inspector**:
+  - Press <kbd>Tab</kbd> or <kbd>s</kbd>: View mode toggles between **Live Turns** and **Recent Sessions**.
+  - In Sessions View:
+    - Top table shows recent sessions: `TIME`, `HARNESS`, `SESSION ID`, `MODEL`, `TURNS`, `IN / OUT / CACHE`, `COST (USD)`.
+    - Bottom pane renders **Session Inspector** showing file path, model resolution, tokens, duration, and turn-by-turn breakdown with tool invocations.
+    - Press <kbd>↑</kbd> / <kbd>↓</kbd> or <kbd>k</kbd> / <kbd>j</kbd>: Move selection across discovered sessions; verify inspector updates to the selected session.
+    - Press <kbd>Enter</kbd>: Toggle expand/collapse of the turn list in the inspector pane.
+    - Press <kbd>h</kbd>: Cycle through discovered agent harnesses (e.g. `ALL AGENTS` $\rightarrow$ `ANTIGRAVITY` $\rightarrow$ `CLAUDE_CODE` $\rightarrow$ `CURSOR` $\dots$).
 - [ ] **Keybinding Controls**:
   - Press <kbd>p</kbd>: Stream pauses, footer shows `Stream paused (events buffered)`.
   - Press <kbd>p</kbd> again: Stream resumes.
-  - Press <kbd>c</kbd>: Turn rows and token counters clear to zero.
+  - Press <kbd>c</kbd>: Turn rows, sessions, and token counters clear to zero.
   - Press <kbd>q</kbd> or <kbd>Ctrl+C</kbd>: Exits gracefully without terminal corruption.
 
 ---
 
-### Phase 5: Hub REST & SSE API Verification
+### Phase 6: Hub REST & SSE API Verification
 
 Verify Hub endpoints using `curl`:
 
@@ -257,7 +305,7 @@ Verify Hub endpoints using `curl`:
 
 ---
 
-### Phase 6: Embedded Web UI Verification
+### Phase 7: Embedded Web UI Verification
 
 Open **`http://localhost:8000/`** in a web browser:
 
@@ -286,7 +334,7 @@ Open **`http://localhost:8000/`** in a web browser:
 
 ---
 
-## 5. Automated Test Suites
+## 6. Automated Test Suites
 
 Run automated verification test suites across the repository:
 
