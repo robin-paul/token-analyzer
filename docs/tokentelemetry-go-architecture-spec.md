@@ -1,127 +1,177 @@
-# TokenTelemetry Go Single-Binary Architecture & Implementation Specification
+# TokenTelemetry Go Single-Module Monorepo & Distributed Telemetry Architecture Specification
 
-**Document Version:** 1.0.0  
-**Target System:** TokenTelemetry Go Rewrite (`tokentelemetry`)  
+**Document Version:** 2.0.0  
+**Target System:** TokenTelemetry Go Rewrite (`tokentelemetry-go`)  
 **Status:** Canonical Implementation Guide  
-**Source Specification Issues:** [#1](https://github.com/robin-paul/token-analyzer/issues/1), [#2](https://github.com/robin-paul/token-analyzer/issues/2), [#3](https://github.com/robin-paul/token-analyzer/issues/3), [#4](https://github.com/robin-paul/token-analyzer/issues/4), [#5](https://github.com/robin-paul/token-analyzer/issues/5), [#6](https://github.com/robin-paul/token-analyzer/issues/6), [#7](https://github.com/robin-paul/token-analyzer/issues/7), [#8](https://github.com/robin-paul/token-analyzer/issues/8)  
+**Source Specification Issues:** [#24](https://github.com/robin-paul/token-analyzer/issues/24), [#25](https://github.com/robin-paul/token-analyzer/issues/25), [#26](https://github.com/robin-paul/token-analyzer/issues/26), [#27](https://github.com/robin-paul/token-analyzer/issues/27)  
 
 ---
 
 ## 1. Executive Summary & Core Architectural Invariants
 
 ### 1.1 Purpose
-This document specifies the complete target architecture, data structures, concurrency models, file formats, REST/SSE interfaces, and migration strategies to port **TokenTelemetry** from its legacy dual-tier Python (FastAPI) and Next.js codebase into a **high-performance, zero-dependency, single deployable Go executable**.
+This document specifies the complete target architecture, directory layout, REST ingestion contracts, concurrency models, terminal user interfaces (TUI), and Kubernetes deployment topologies for the **TokenTelemetry Go Single-Module Monorepo**.
+
+The system separates local developer telemetry collection from centralized web/API hosting while maintaining a single unified Go module (`go.mod`):
+1. **Collector (`cmd/tt`)**: A lightweight client command-line utility running on developer workstations and CI environments that passively monitors local AI coding agent transcripts, parses token usage, presents a rich interactive terminal interface via Charm's Bubble Tea, and streams ingestion batches over HTTP.
+2. **Hub (`cmd/tt-server`)**: A centralized telemetry backend deployed to Kubernetes or server instances that validates ingestion batches, persists sessions in SQLite (WAL mode), recalculates analytical rollups, and serves real-time Server-Sent Events (SSE) alongside an embedded Astro Web dashboard.
 
 ### 1.2 Core Architectural Invariants
-1. **Single Static Binary**: The entire system—backend REST API, real-time SSE streamer, transcript file watcher, 18+ agent parsers, offline pricing engine, SQLite database engine, and the static Astro Web UI—must compile into a single static binary without external runtime dependencies (no Node.js, Python, or dynamic C libraries required at runtime).
-2. **CGO-Free Pure-Go SQLite**: Use `modernc.org/sqlite` to enable static cross-compilation across all major operating systems (`linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`, `windows/amd64`) without requiring a C compiler toolchain.
-3. **Embedded Static Astro Frontend with React Client Islands**: Pre-render all standard dashboard views to static HTML/CSS/JS via Astro, embedding the compiled output into the Go binary using Go's `//go:embed`. Dynamic and high-interactivity components (Analytics charts, Session Inspector step-scrubber, Hermes Kanban board) are hydrated on the client via React 19 islands.
-4. **Passive On-Disk Ingestion & Checkpointing**: Parse agent log directories passively from disk (no active HTTP proxying) using a debounced `fsnotify` event stream combined with a 60-second background reconciler ticker. Track incremental byte offsets and file modification timestamps to prevent redundant re-parsing.
-5. **Two-Tier Offline Pricing & Power Estimation**: Estimate monetary LLM costs and local hardware electricity usage completely offline using an embedded pricing dataset (`pricing_data.json`) supplemented with database user overrides.
+1. **Single Go Module Monorepo**: All binaries (`cmd/tt`, `cmd/tt-server`) and shared packages (`internal/models`, `internal/parsers`, `internal/pricing`, `internal/client`, etc.) reside within a single Go module at repository root (`github.com/robin-paul/tokentelemetry-go`), eliminating multi-module versioning overhead and `replace` directives.
+2. **Clean Seam & Presentation Decoupling**:
+   - The CLI Collector (`cmd/tt`) contains no web server or frontend assets, keeping client binary size minimal (~15MB).
+   - Ingestion pipelines output to a clean `EventSink` interface, allowing dynamic runtime selection between an interactive Bubble Tea TUI, a headless structured `slog` daemon, or a batch CLI sync command.
+3. **Non-Blocking TUI Event Loop**:
+   - Bubble Tea’s Elm Architecture event loop (`Update` and `View`) never performs disk I/O, regex parsing, or network calls directly.
+   - Background filesystem watcher goroutines and parser worker pools dispatch events into Bubble Tea via thread-safe `tea.Program.Send(msg)` calls.
+4. **Idempotent HTTP REST Ingestion & Checkpointing**:
+   - Telemetry transfer between Collector and Hub occurs via `POST /api/v1/ingest` with structured `IngestionBatch` JSON payloads.
+   - Hub persistence uses atomic SQLite single-writer transactions with `INSERT ... ON CONFLICT(id) DO UPDATE` upserts for sessions and turns, guaranteeing safe replay and duplicate tolerance across network retries.
+5. **CGO-Free Pure-Go SQLite**: Use `modernc.org/sqlite` on the Hub to enable cross-compilation across all operating systems (`linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`, `windows/amd64`) without C toolchain dependencies.
+6. **Embedded Static Astro Frontend with React Islands**: The Hub embeds pre-rendered static HTML/CSS/JS via Go's `//go:embed all:dist` in `internal/web/assets.go`. High-interactivity components (Analytics charts, Session Inspector turn-scrubber, Hermes Kanban board) hydrate on the client via React 19 islands.
+7. **Passive On-Disk Ingestion & Offline Pricing**: Zero MITM proxying of LLM traffic. The system parses logs passively from disk (`fsnotify` + 60s reconciler) and computes financial costs completely offline using an embedded pricing catalog (`internal/pricing/pricing_data.json`).
 
 ---
 
-## 2. High-Level Architecture & Concurrency Topology
+## 2. High-Level Distributed Topology & Monorepo Layout
+
+### 2.1 System Topology
 
 ```
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│                                TOKEN TELEMETRY (GO BINARY)                             │
-│                                                                                        │
-│  ┌─────────────────────────┐   HTTP / SSE (Single Port :8000)   ┌───────────────────┐  │
-│  │   Embedded Astro Web    │ ◄────────────────────────────────► │     chi Router    │  │
-│  │ (React Client Islands)  │                                    │  & Auth / CORS MW │  │
-│  └─────────────────────────┘                                    └─────────┬─────────┘  │
-│                                                                           │            │
-│  ┌────────────────────────────────────────────────────────┐               │            │
-│  │                    Events Broker                       │ ◄─────────────┤            │
-│  │      (Real-time SSE Broadcast & Heartbeat Hub)         │               │            │
-│  └──────────────────────────▲─────────────────────────────┘               │            │
-│                             │                                             ▼            │
-│  ┌──────────────────────────┴─────────────────────────────┐     ┌───────────────────┐  │
-│  │             Scanner & Watcher Concurrency              │     │   REST Handlers   │  │
-│  │  ┌──────────────┐     ┌──────────────┐     ┌─────────┐ │     │ (40+ Endpoints)   │  │
-│  │  │ fsnotify     │ ──► │ Bounded      │ ──► │ Batch   │ │     └─────────┬─────────┘  │
-│  │  │ Watcher      │     │ Worker Pool  │     │ Channel │ │               │            │
-│  │  │ + Reconciler │     │ (18+ Parsers)│     │ Commit  │ │               │            │
-│  │  └──────────────┘     └──────────────┘     └────┬────┘ │               │            │
-│  └─────────────────────────────────────────────────┼──────┘               │            │
-│                                                    │                      │            │
-│                                                    ▼                      ▼            │
-│  ┌──────────────────────────────────────────────────────────────────────────────────┐  │
-│  │                         Pure-Go SQLite Engine (WAL Mode)                         │  │
-│  │  ┌──────────────────────────────────────┐  ┌──────────────────────────────────┐  │  │
-│  │  │  Dedicated Single-Writer Connection  │  │  Multi-Connection Read Pool      │  │  │
-│  │  │  (SetMaxOpenConns(1) / Serialized)   │  │  (SetMaxOpenConns(2 * NumCPU))   │  │  │
-│  │  └──────────────────────────────────────┘  └──────────────────────────────────┘  │  │
-│  └──────────────────────────────────────────────────────────────────────────────────┘  │
-└────────────────────────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                               DEVELOPER WORKSTATION / CI RUNNER                                │
+│                                                                                                │
+│  ┌────────────────────────┐   fsnotify    ┌───────────────────────────┐                        │
+│  │   Agent Transcripts    │ ────────────► │     Scanner & Parsers     │                        │
+│  │ (~/.claude, ~/.cursor) │               │   (Worker Pool & Checkpt) │                        │
+│  └────────────────────────┘               └─────────────┬─────────────┘                        │
+│                                                         │                                      │
+│                                                         ▼                                      │
+│                                           ┌───────────────────────────┐                        │
+│                                           │   EventSink Dispatcher    │                        │
+│                                           └──────┬─────────────┬──────┘                        │
+│                                                  │             │                               │
+│                      [Interactive TTY]           │             │      [Headless Daemon]        │
+│                                                  ▼             ▼                               │
+│                                    ┌──────────────────┐  ┌───────────────────┐                 │
+│                                    │  Bubble Tea TUI  │  │  slog JSON Logger │                 │
+│                                    │ (Lip Gloss Grid) │  │ (stdout / stderr) │                 │
+│                                    └──────────────────┘  └───────────────────┘                 │
+│                                                  │             │                               │
+│                                                  ▼             ▼                               │
+│                                    ┌──────────────────────────────────┐                        │
+│                                    │      internal/client Ingest      │                        │
+│                                    │   (Batch Buffer + Full Jitter)   │                        │
+│                                    └──────────────────┬───────────────┘                        │
+└───────────────────────────────────────────────────────┼────────────────────────────────────────┘
+                                                        │ HTTP POST /api/v1/ingest
+                                                        │ Bearer Token / X-TT-Machine-ID
+                                                        ▼
+┌────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                             KUBERNETES TELEMETRY HUB (tt-server)                               │
+│                                                                                                │
+│  ┌─────────────────────────┐   HTTP / SSE (Single Port :8000)   ┌───────────────────────────┐  │
+│  │   Embedded Astro Web    │ ◄────────────────────────────────► │        chi Router         │  │
+│  │ (React Client Islands)  │                                    │ & RemoteAuth / CORS MW    │  │
+│  └─────────────────────────┘                                    └─────────────┬─────────────┘  │
+│                                                                               │                │
+│  ┌────────────────────────────────────────────────────────┐                   │                │
+│  │                    Events Broker                       │ ◄─────────────────┤                │
+│  │      (Real-time SSE Broadcast & Heartbeat Hub)         │                   │                │
+│  └──────────────────────────▲─────────────────────────────┘                   ▼                │
+│                             │                                   ┌───────────────────────────┐  │
+│                             │ Ingestion Events                  │    POST /api/v1/ingest    │  │
+│                             └───────────────────────────────────┤      Ingest Handler       │  │
+│                                                                 └─────────────┬─────────────┘  │
+│                                                                               │                │
+│                                                                               ▼                │
+│  ┌──────────────────────────────────────────────────────────────────────────────────────────┐  │
+│  │                           Pure-Go SQLite Engine (WAL Mode)                               │  │
+│  │  ┌──────────────────────────────────────────┐  ┌──────────────────────────────────────┐  │  │
+│  │  │   Dedicated Single-Writer Connection     │  │   Multi-Connection Read Pool         │  │  │
+│  │  │   (SetMaxOpenConns(1) / Serialized Tx)   │  │   (SetMaxOpenConns(2 * NumCPU))      │  │  │
+│  │  └──────────────────────────────────────────┘  └──────────────────────────────────────┘  │  │
+│  └──────────────────────────────────────────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
----
-
-## 3. Go Package & Directory Layout
-
-The repository is organized following standard Go project layout principles with deep package encapsulation in `internal/`:
+### 2.2 Go Monorepo Directory Structure
 
 ```
-tokentelemetry/
+repositories/tokentelemetry-go/
 ├── cmd/
-│   └── tokentelemetry/
-│       └── main.go                 # Entrypoint: CLI flag parsing, signal handling, server lifecycle
+│   ├── tt/                         # Client CLI Collector binary
+│   │   ├── main.go                 # Cobra command tree entrypoint
+│   │   ├── watch.go                # tt watch (TUI or daemon)
+│   │   ├── scan.go                 # tt scan (one-off sweep)
+│   │   ├── config.go               # tt config get/set
+│   │   ├── status.go               # tt status
+│   │   └── send.go                 # tt send (test injection)
+│   └── tt-server/                  # Central Telemetry Hub server binary
+│       └── main.go                 # Hub entrypoint: flags, DB init, chi router, web handler
 ├── internal/
-│   ├── api/                        # HTTP routing, REST handlers, middleware, request/response DTOs
+│   ├── api/                        # Hub REST API handlers & middleware
 │   │   ├── router.go               # chi router registration & SPA fallback
 │   │   ├── middleware.go           # Bearer auth, CORS, logging, gzip recovery
-│   │   ├── sessions.go             # /api/sessions, /api/recent, /api/agent-sessions
-│   │   ├── analytics.go            # /api/stats, /api/leaderboard, /api/charts
+│   │   ├── ingest.go               # POST /api/v1/ingest handler
+│   │   ├── sessions.go             # /api/sessions, /api/recent
+│   │   ├── stats.go                # /api/stats, /api/stats/daily, /api/leaderboard
+│   │   ├── projects.go             # /api/projects
 │   │   ├── hermes.go               # /api/hermes/* handlers
 │   │   ├── config.go               # /api/config, /api/settings, /api/pricing
-│   │   └── health.go               # /healthz, /version
+│   │   ├── system.go               # /healthz, /version
+│   │   └── server.go               # Server struct and lifecycle
+│   ├── client/                     # Collector HTTP client & batch buffer
+│   │   ├── ingest.go               # HTTP client with retry, full jitter, machine metadata
+│   │   └── buffer.go               # Bounded batching channel buffer (50 items / 500ms)
+│   ├── collector/                  # Collector engine & presentation decoupling
+│   │   ├── pipeline.go             # Watcher + Parser + Ingest Coordinator
+│   │   ├── sink.go                 # EventSink interface (TUISink vs SlogSink)
+│   │   └── config.go               # Collector config file parser (~/.tokentelemetry/config.yaml)
+│   ├── tui/                        # Charm Bubble Tea interactive TUI
+│   │   ├── model.go                # tea.Model state machine, Update loop, keymaps
+│   │   ├── view.go                 # Lip Gloss responsive layout renderer (KPIs, table, header)
+│   │   ├── styles.go               # Color palette & Lip Gloss style definitions
+│   │   └── runner.go               # tea.Program initialization and terminal lifecycle
 │   ├── events/                     # Real-time event streaming & SSE
 │   │   ├── broker.go               # Central thread-safe SSE subscriber hub
-│   │   └── messages.go             # SSE event payloads (session.new, session.update, scan.progress)
-│   ├── scanner/                    # Agent transcript scanning & parsing engine
+│   │   └── messages.go             # SSE event payloads (session.new, session.update, stats.updated)
+│   ├── scanner/                    # Agent transcript scanning & parser engine
 │   │   ├── engine.go               # Orchestrator, worker pool, discovery manager
 │   │   ├── checkpoint.go           # File state tracking (mtime, size, byte offset)
-│   │   ├── parsers/                # Agent-specific parser implementations
-│   │   │   ├── parser.go           # Parser interface & TranscriptChunk struct
-│   │   │   ├── claude.go           # Claude Code parser (~/.claude/projects)
-│   │   │   ├── codex.go            # OpenAI Codex CLI parser (~/.codex/sessions)
-│   │   │   ├── gemini.go           # Gemini CLI parser (~/.gemini)
-│   │   │   ├── antigravity.go      # Antigravity CLI parser (~/.gemini/antigravity-cli)
-│   │   │   ├── qwen.go             # Qwen Code parser (~/.qwen)
-│   │   │   ├── cursor.go           # Cursor IDE transcripts & state.vscdb
-│   │   │   ├── copilot.go          # GitHub Copilot CLI & VS Code logs
-│   │   │   ├── opencode.go         # OpenCode parser
-│   │   │   ├── hermes.go           # Hermes autonomous agent telemetry
-│   │   │   ├── grok.go             # Grok Build parser
-│   │   │   ├── pi.go               # Pi Coding Agent parser
-│   │   │   ├── cline.go            # Cline extension parser
-│   │   │   ├── metamuse.go         # Meta Muse parser
-│   │   │   ├── prime.go            # Prime Agent parser
-│   │   │   ├── smallcode.go        # SmallCode parser
-│   │   │   ├── dsh.go              # DeepSeek Harness (dsh) parser
-│   │   │   ├── roo.go              # Roo Code parser
-│   │   │   └── windsurf.go         # Windsurf / Cascade parser
+│   │   └── parsers/                # 18+ Agent-specific parser implementations
+│   │       ├── parser.go           # AgentParser interface & data types
+│   │       ├── claude.go           # Claude Code parser
+│   │       ├── codex.go            # Codex CLI parser
+│   │       ├── gemini.go           # Gemini CLI parser
+│   │       ├── antigravity.go      # Antigravity CLI parser
+│   │       ├── cursor.go           # Cursor IDE SQLite / state.vscdb parser
+│   │       ├── copilot.go          # GitHub Copilot CLI & VS Code parser
+│   │       ├── opencode.go         # OpenCode parser
+│   │       ├── hermes.go           # Hermes autonomous agent telemetry parser
+│   │       └── ...                 # Cline, Roo, Pi, Grok, DSH, MetaMuse, SmallCode, Windsurf
 │   ├── watcher/                    # Log filesystem watcher
 │   │   ├── watcher.go              # fsnotify directory watcher & debouncing
-│   │   └── reconciler.go           # 60s fallback ticker reconciler
-│   ├── pricing/                    # Two-tier pricing engine & cost calculator
-│   │   ├── engine.go               # Pricing calculation, cache multipliers, TTL partitions
+│   │   └── reconciler.go           # Periodic fallback reconciler
+│   ├── pricing/                    # Offline pricing engine & cost calculator
+│   │   ├── engine.go               # Pricing calculation, cache multipliers
 │   │   ├── dataset.go              # Embedded models.dev pricing table loader
-│   │   ├── resolver.go             # Fuzzy longest-prefix model name matching
-│   │   └── power.go                # Hardware profile power/electricity estimation
+│   │   ├── resolver.go             # Fuzzy longest-prefix model resolver
+│   │   ├── power.go                # Hardware profile power/electricity estimator
+│   │   └── pricing_data.json       # Embedded catalog of 1,000+ public model rates
 │   ├── store/                      # Pure-Go SQLite persistence layer
-│   │   ├── db.go                   # Connection initialization & WAL pragma configuration
-│   │   ├── migrations/             # Embedded SQL migration scripts
+│   │   ├── db.go                   # Single-writer connection & WAL pragmas
+│   │   ├── migrator.go             # Embedded SQL migration runner
+│   │   ├── migrations/             # SQL migration files
 │   │   │   ├── 0001_initial.sql
-│   │   │   └── 0002_indexes.sql
-│   │   ├── migrator.go             # Schema migration runner
-│   │   ├── sessions.go             # Session & message turn queries
+│   │   │   ├── 0002_indexes.sql
+│   │   │   └── 0003_collector_ingest.sql
+│   │   ├── sessions.go             # Session & message turn queries / upserts
 │   │   ├── summaries.go            # Daily summary rollups & aggregations
 │   │   └── checkpoints.go          # Scanner checkpoint persistence
 │   ├── models/                     # Shared domain entities
 │   │   ├── session.go              # Session, MessageTurn, SubagentRun
+│   │   ├── ingest.go               # IngestionBatch, ClientMetadata, IngestionResponse
 │   │   ├── pricing.go              # ModelRate, PricingOverride, PowerConfig
 │   │   └── summary.go              # DailySummary, LeaderboardEntry, FilterParams
 │   └── web/                        # Embedded Astro static assets
@@ -132,434 +182,313 @@ tokentelemetry/
 │   ├── astro.config.mjs
 │   ├── tailwind.config.mjs
 │   ├── src/
-│   │   ├── layouts/                # BaseLayout.astro, DashboardLayout.astro
-│   │   ├── pages/                  # Static routes (index.astro, analytics.astro, etc.)
+│   │   ├── layouts/                # BaseLayout.astro
+│   │   ├── pages/                  # Static routes (index.astro, analytics, sessions, etc.)
 │   │   ├── components/             # React Client Islands (Inspector, Charts, Kanban)
-│   │   ├── lib/                    # API client, formatting helpers, brand tokens
-│   │   └── styles/                 # Tailwind CSS v4 globals.css
+│   │   └── lib/                    # API client & formatting utilities
+├── deploy/                         # Production & Kubernetes deployments
+│   ├── Dockerfile                  # Multi-stage Hub build (Node Astro + Pure-Go binary)
+│   └── k8s/                        # Kubernetes manifests
+│       ├── deployment.yaml
+│       ├── service.yaml
+│       └── pvc.yaml
 ├── Makefile                        # Unified build, test, and release targets
-└── go.mod
+└── go.mod                          # Single Go module definition
 ```
 
 ---
 
-## 4. Pure-Go SQLite Database & Schema Specification
+## 3. HTTP Ingestion REST API & Persistence Specification
 
-### 4.1 Driver & Pragmas
-Database operations use `modernc.org/sqlite`. The connection pool is split into a **single-writer connection** and a **multi-reader pool** to prevent `SQLITE_BUSY` contention while permitting parallel HTTP reads.
+### 3.1 REST Endpoint: `POST /api/v1/ingest`
+- **Path**: `/api/v1/ingest`
+- **Method**: `POST`
+- **Headers**:
+  - `Content-Type: application/json`
+  - `Authorization: Bearer <token>` (Constant-time verified via `crypto/subtle.ConstantTimeCompare`)
+  - `X-TT-Machine-ID: <uuid>` (Collector machine identifier)
+  - `X-TT-Client-Version: <semver>`
+  - `X-TT-Batch-ID: <uuid>`
 
+### 3.2 Request Schema (`IngestionBatch`)
 ```go
-// Connection Pool Initialization
-db, err := sql.Open("sqlite", "file:tokentelemetry.db?_pragma=busy_timeout(5000)")
-if err != nil {
-    return nil, err
+package models
+
+import "time"
+
+type ClientMetadata struct {
+    MachineID     string    `json:"machine_id"`
+    Hostname      string    `json:"hostname"`
+    ClientVersion string    `json:"client_version"`
+    User          string    `json:"user,omitempty"`
+    OS            string    `json:"os,omitempty"`
+    SentAt        time.Time `json:"sent_at"`
+    BatchID       string    `json:"batch_id"`
 }
 
-// Global Pragmas executed on startup
-pragmas := []string{
-    "PRAGMA journal_mode = WAL;",
-    "PRAGMA busy_timeout = 5000;",
-    "PRAGMA synchronous = NORMAL;",
-    "PRAGMA foreign_keys = ON;",
-    "PRAGMA cache_size = -64000;", // 64MB memory cache
-    "PRAGMA temp_store = MEMORY;",
-}
-for _, p := range pragmas {
-    if _, err := db.Exec(p); err != nil {
-        return nil, fmt.Errorf("pragma %s failed: %w", p, err)
-    }
+type IngestionBatch struct {
+    Metadata ClientMetadata `json:"metadata"`
+    Sessions []Session      `json:"sessions"`
 }
 
-// Pool Constraints
-db.SetMaxOpenConns(max(4, runtime.NumCPU() * 2))
-db.SetMaxIdleConns(max(2, runtime.NumCPU()))
-db.SetConnMaxLifetime(0)
+type IngestionResponse struct {
+    Status           string    `json:"status"`
+    BatchID          string    `json:"batch_id"`
+    AcceptedSessions int       `json:"accepted_sessions"`
+    AcceptedTurns    int       `json:"accepted_turns"`
+    RejectedSessions int       `json:"rejected_sessions"`
+    Errors           []string  `json:"errors,omitempty"`
+    ServerTime       time.Time `json:"server_time"`
+}
 ```
 
-### 4.2 Relational DDL Schema (`0001_initial.sql`)
-
-```sql
--- 1. Schema Migrations Tracker
-CREATE TABLE IF NOT EXISTS schema_migrations (
-    version INTEGER PRIMARY KEY,
-    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- 2. Sessions (Primary conversation / execution units)
-CREATE TABLE IF NOT EXISTS sessions (
-    id TEXT PRIMARY KEY,                       -- UUID or deterministic hash (agent:filepath:id)
-    session_id TEXT NOT NULL,                  -- Native session ID from agent transcript
-    agent_name TEXT NOT NULL,                  -- 'claude_code', 'gemini_cli', 'codex', etc.
-    project_name TEXT NOT NULL,                -- Resolved project name / folder basename
-    file_path TEXT NOT NULL UNIQUE,            -- Absolute path to transcript file
-    created_at TIMESTAMP NOT NULL,             -- Session start timestamp
-    updated_at TIMESTAMP NOT NULL,             -- Last updated timestamp
-    start_time TIMESTAMP NOT NULL,             -- First message timestamp
-    end_time TIMESTAMP NOT NULL,               -- Last message timestamp
-    duration_seconds REAL DEFAULT 0,           -- Total active wall-clock time
-    model_raw TEXT NOT NULL,                   -- Raw model name from log (e.g. 'claude-3-7-sonnet-20250219')
-    model_resolved TEXT NOT NULL,              -- Canonical model name for pricing lookup
-    input_tokens INTEGER DEFAULT 0,            -- Total net prompt tokens
-    output_tokens INTEGER DEFAULT 0,           -- Total completion tokens
-    cache_read_tokens INTEGER DEFAULT 0,       -- Prompt cache hit tokens
-    cache_creation_tokens INTEGER DEFAULT 0,   -- Prompt cache write tokens
-    gross_cost_usd REAL DEFAULT 0,             -- Cost without cache discounts
-    net_cost_usd REAL DEFAULT 0,               -- True billable cost with cache discounts
-    electricity_cost_usd REAL DEFAULT 0,       -- Estimated hardware power cost
-    hardware_profile TEXT DEFAULT 'default',   -- CPU/GPU profile identifier
-    status TEXT DEFAULT 'completed',           -- 'active', 'completed', 'error'
-    git_branch TEXT DEFAULT '',                -- Associated git branch name
-    is_subagent BOOLEAN DEFAULT 0,             -- 1 if spawned by parent orchestrator
-    parent_session_id TEXT DEFAULT '',         -- ID of parent orchestrator session
-    subagent_type TEXT DEFAULT ''              -- Subagent role/type ('research', 'planner', etc.)
-);
-
--- 3. Message Turns (Fine-grained turn-by-turn metrics)
-CREATE TABLE IF NOT EXISTS message_turns (
-    id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL,
-    turn_index INTEGER NOT NULL,
-    timestamp TIMESTAMP NOT NULL,
-    role TEXT NOT NULL,                        -- 'user', 'assistant', 'system', 'tool'
-    model_name TEXT NOT NULL,
-    input_tokens INTEGER DEFAULT 0,
-    output_tokens INTEGER DEFAULT 0,
-    cache_read_tokens INTEGER DEFAULT 0,
-    cache_creation_tokens INTEGER DEFAULT 0,
-    cost_usd REAL DEFAULT 0,
-    tools_invoked_json TEXT DEFAULT '[]',      -- JSON array of tool names called
-    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
-);
-
--- 4. Subagent Runs (Parent-Child Rollup Linkages)
-CREATE TABLE IF NOT EXISTS subagent_runs (
-    id TEXT PRIMARY KEY,
-    parent_session_id TEXT NOT NULL,
-    child_session_id TEXT NOT NULL UNIQUE,
-    agent_type TEXT NOT NULL,
-    tokens INTEGER DEFAULT 0,
-    cost_usd REAL DEFAULT 0,
-    created_at TIMESTAMP NOT NULL,
-    FOREIGN KEY (parent_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
-    FOREIGN KEY (child_session_id) REFERENCES sessions(id) ON DELETE CASCADE
-);
-
--- 5. Daily Summaries (Pre-aggregated rollups for instant dashboard queries)
-CREATE TABLE IF NOT EXISTS daily_summaries (
-    date TEXT NOT NULL,                        -- YYYY-MM-DD
-    agent_name TEXT NOT NULL,
-    project_name TEXT NOT NULL,
-    model_name TEXT NOT NULL,
-    total_sessions INTEGER DEFAULT 0,
-    total_input_tokens INTEGER DEFAULT 0,
-    total_output_tokens INTEGER DEFAULT 0,
-    total_cache_read_tokens INTEGER DEFAULT 0,
-    total_cache_creation_tokens INTEGER DEFAULT 0,
-    total_cost_usd REAL DEFAULT 0,
-    total_duration_seconds REAL DEFAULT 0,
-    PRIMARY KEY (date, agent_name, project_name, model_name)
-);
-
--- 6. Pricing Overrides (User-defined custom model rates)
-CREATE TABLE IF NOT EXISTS pricing_overrides (
-    model_pattern TEXT PRIMARY KEY,            -- Exact name or regex/prefix pattern
-    input_cost_per_m REAL NOT NULL,            -- USD per 1M input tokens
-    output_cost_per_m REAL NOT NULL,           -- USD per 1M output tokens
-    cache_read_cost_per_m REAL DEFAULT 0,      -- USD per 1M cache read tokens
-    cache_write_cost_per_m REAL DEFAULT 0,     -- USD per 1M cache write tokens
-    source TEXT DEFAULT 'user_override',
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- 7. Scanner Checkpoints (Fast incremental scan resume)
-CREATE TABLE IF NOT EXISTS scanner_checkpoints (
-    file_path TEXT PRIMARY KEY,
-    last_modified TIMESTAMP NOT NULL,
-    file_size INTEGER NOT NULL,
-    byte_offset INTEGER NOT NULL,
-    line_number INTEGER NOT NULL,
-    file_hash TEXT NOT NULL
-);
-
--- 8. Core Performance Indexes
-CREATE INDEX IF NOT EXISTS idx_sessions_agent_start ON sessions(agent_name, start_time DESC);
-CREATE INDEX IF NOT EXISTS idx_sessions_project_start ON sessions(project_name, start_time DESC);
-CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id) WHERE is_subagent = 1;
-CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_message_turns_session ON message_turns(session_id, turn_index);
-CREATE INDEX IF NOT EXISTS idx_daily_summaries_date ON daily_summaries(date DESC);
-```
+### 3.3 Hub Persistence & Idempotency Semantics
+1. **Machine Scoping**: Sessions are tagged with `machine_id` (`0003_collector_ingest.sql`). Composite index `idx_sessions_machine_agent ON sessions(machine_id, agent_name, start_time DESC)`.
+2. **Session Upsert**:
+   ```sql
+   INSERT INTO sessions (
+       id, session_id, agent_name, project_name, file_path, machine_id,
+       created_at, updated_at, start_time, end_time, duration_seconds,
+       model_raw, model_resolved, input_tokens, output_tokens,
+       cache_read_tokens, cache_creation_tokens, gross_cost_usd, net_cost_usd,
+       electricity_cost_usd, hardware_profile, status, git_branch,
+       is_subagent, parent_session_id, subagent_type
+   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+   ON CONFLICT(id) DO UPDATE SET
+       updated_at = excluded.updated_at,
+       end_time = excluded.end_time,
+       duration_seconds = excluded.duration_seconds,
+       model_raw = excluded.model_raw,
+       model_resolved = excluded.model_resolved,
+       input_tokens = excluded.input_tokens,
+       output_tokens = excluded.output_tokens,
+       cache_read_tokens = excluded.cache_read_tokens,
+       cache_creation_tokens = excluded.cache_creation_tokens,
+       gross_cost_usd = excluded.gross_cost_usd,
+       net_cost_usd = excluded.net_cost_usd,
+       electricity_cost_usd = excluded.electricity_cost_usd,
+       status = excluded.status,
+       git_branch = excluded.git_branch;
+   ```
+3. **Turn Replacement**: Existing turns for updated sessions are deleted and replaced atomically within the single-writer transaction to guarantee zero duplicate turns.
+4. **Summary Recalculation**: `db.RollupDailySummariesForDate(ctx, date)` runs immediately after transaction commit for all affected dates in the batch.
+5. **Real-Time SSE Propagation**: Hub dispatches `session.created` (new sessions), `session.updated` (modified sessions), and `stats.updated` events to connected browser tabs.
 
 ---
 
-## 5. Agent Transcript Scanning & Parser Specifications
+## 4. Collector CLI & Cobra Architecture (`cmd/tt`)
 
-### 5.1 Discovery & Scanner Concurrency Pipeline
-1. **Agent Path Registry**: Scans standard locations on startup:
-   - `~/.claude/projects/**/*.jsonl`
-   - `~/.gemini/antigravity-cli/brain/**/*.jsonl`
-   - `~/.gemini/transcripts/*.json`
-   - `~/.codex/sessions/**/*.json`
-   - `~/.cursor/projects/**/state.vscdb` & transcripts
-   - `~/.config/github-copilot/*.log`
-   - `~/.opencode/logs/*.jsonl`
-   - `~/.hermes/telemetry/*.jsonl`
-2. **Worker Pool Concurrency**:
-   - `fsnotify` watcher listens for directory modifications.
-   - Events are debounced via a 250ms per-file sliding window channel.
-   - A bounded pool of `N = min(runtime.NumCPU(), 8)` worker goroutines consumes file change events.
-   - Workers query `scanner_checkpoints` to determine if a file has changed (`mtime != saved_mtime || size != saved_size`).
-   - If changed, workers read only newly appended bytes starting from `byte_offset`.
-   - Parsed records are dispatched to a batch writer channel that commits transactions to SQLite every 100ms or 50 items.
+### 4.1 Command Matrix
 
-### 5.2 Universal Parser Interface
-```go
-package parsers
-
-import (
-    "io"
-    "time"
-)
-
-type TokenUsage struct {
-    InputTokens         int64
-    OutputTokens        int64
-    CacheReadTokens     int64
-    CacheCreationTokens int64
-}
-
-type Turn struct {
-    Index     int
-    Timestamp time.Time
-    Role      string
-    Model     string
-    Usage     TokenUsage
-    Tools     []string
-}
-
-type ParsedSession struct {
-    ID               string
-    AgentName        string
-    ProjectName      string
-    FilePath         string
-    StartTime        time.Time
-    EndTime          time.Time
-    Model            string
-    TotalUsage       TokenUsage
-    Turns            []Turn
-    IsSubagent       bool
-    ParentSessionID  string
-    SubagentType     string
-    GitBranch        string
-    Status           string
-}
-
-type AgentParser interface {
-    AgentName() string
-    Detect(filePath string) bool
-    Parse(r io.Reader, startOffset int64) (*ParsedSession, int64, error)
-}
-```
-
-### 5.3 Agent Parsing Matrix & Normalization Rules
-
-| Agent | File Format | Token Extraction Schema & Rules |
+| Command | Arguments / Flags | Description |
 | :--- | :--- | :--- |
-| **Claude Code** | JSONL | Extract from `type: "assistant"` lines: `message.usage.input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`. Subagent files detected via parent session directory linkage. |
-| **Antigravity CLI** | JSONL | Parse `step_index`, `type: "PLANNER_RESPONSE"`. Usage in `metrics.tokens` or `tool_calls`. Count-once subagent rollups via `parent_conversation_id`. |
-| **Gemini CLI** | JSON | Parse `turns[]` with `usageMetadata.promptTokenCount`, `candidatesTokenCount`, `cachedContentTokenCount`. |
-| **Codex CLI** | JSON/JSONL | Parse `response.usage.prompt_tokens`, `completion_tokens`. Net calculation: subtract previous cumulative prompt if protocol transmits total context length. |
-| **Cursor IDE** | SQLite / JSON | Read `state.vscdb` table `ItemTable` keys `cursorAuth/cachedTokens` and `chatHistory`. |
-| **Copilot CLI** | Log / JSON | Parse `[telemetry] request: input_tokens=X, output_tokens=Y`. |
-| **Hermes Agent** | JSONL | Read `hermes_telemetry.py` compatible JSONL with task status, tool outcomes, and token usage records. |
-| **Pi / Cline / Roo** | JSON / JSONL | Parse custom telemetry blocks with normalized prompt/completion counters. |
+| `tt watch` *(default)* | `[paths...]`, `--hub`, `--api-key`, `--daemon`, `--log-level` | Monitor transcript directories. Runs interactive Bubble Tea TUI on TTY, or structured `slog` daemon when `--daemon` or non-TTY. |
+| `tt scan` | `[paths...]`, `--hub`, `--api-key`, `--dry-run` | One-off discovery sweep of transcript directories, parsing all sessions and streaming sync batch to Hub. |
+| `tt config` | `get [key]`, `set [key] [val]`, `list` | Inspect and edit local collector configuration in `~/.tokentelemetry/config.yaml`. |
+| `tt status` | `--hub`, `--api-key` | Ping configured Hub server, print connectivity health, active watchers, and local queue stats. |
+| `tt send` | `--file <path>`, `--agent <name>` | Inject a synthetic transcript file for end-to-end integration and verification testing. |
+
+### 4.2 Configuration Precedence
+1. Explicit CLI Flags (`--hub`, `--api-key`, `--scan-dir`).
+2. Environment Variables (`TT_HUB_URL`, `TT_AUTH_TOKEN`, `TT_SCAN_DIR`).
+3. User Configuration File (`~/.tokentelemetry/config.yaml`).
+4. Hardcoded Defaults (`hub: http://localhost:8000`, standard agent directories).
 
 ---
 
-## 6. Offline Pricing & Cost Engine Specification
+## 5. Interactive Bubble Tea TUI Architecture (`internal/tui`)
 
-### 6.1 Two-Tier Pricing Dataset
-1. **Tier 1 (Base Dataset)**: Embedded JSON file (`internal/pricing/pricing_data.json`) generated from `models.dev/api.json` containing 1,000+ public model pricing entries.
-2. **Tier 2 (User Overrides)**: Database table `pricing_overrides` queried with priority over Tier 1.
+### 5.1 Presentation Decoupling & Non-Blocking Invariant
+The presentation layer is decoupled via the `collector.EventSink` interface:
+- **`TUISink`**: Dispatches incoming turns and session events to Bubble Tea using thread-safe `tea.Program.Send(TurnIngestedMsg{...})`.
+- **`SlogSink`**: Writes structured JSON or text log lines to stdout when running in headless daemon mode.
 
-### 6.2 Fuzzy Longest-Prefix Matching
-Arbitrary model strings from agent transcripts (e.g. `us.anthropic.claude-3-7-sonnet-20250219-v1:0` or `openai/gpt-4o-2024-08-06`) are normalized:
-1. Strip provider prefixes (`anthropic/`, `openai/`, `google/`, `bedrock/`, `us.`).
-2. Match against known prefixes ordered by length descending.
-3. Fallback to family default (e.g. `claude-3-7-sonnet` -> default Sonnet rate) or zero-cost with a warning.
+### 5.2 Layout Breakdown (Lip Gloss)
+```
+┌────────────────────────────────────────────────────────────────────────────────────────────────┐
+│  ⚡ TOKEN TELEMETRY COLLECTOR        ● HUB: ONLINE (http://k8s-tt:8000)         UPTIME: 1h 24m │
+├────────────────────────────────┬───────────────────────────────┬───────────────────────────────┤
+│ THROUGHPUT                     │ CACHE EFFICIENCY              │ ESTIMATED COST                │
+│ 1,420.5 tok/s                  │ 68.4% Hit Rate                │ $14.82 Net                    │
+│ 42 turns ingested              │ 1.2M tokens saved             │ $22.40 Gross (Est)            │
+├────────────────────────────────┴───────────────────────────────┴───────────────────────────────┤
+│ TIME      AGENT       PROJECT             MODEL                 IN / OUT / CACHE          COST │
+├────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ 14:02:11  claude_code token-analyzer      claude-3-7-sonnet     125000 / 4200 / 850000  $0.1245│
+│ 14:02:18  codex       fintech-platform    o3-mini               4510 / 890 / 0          $0.0180│
+│ 14:02:25  cursor      react-dashboard     claude-3-5-sonnet     890 / 240 / 16384       $0.0080│
+│ 14:02:30  hermes      db-optimizer        deepseek-r1           12400 / 1200 / 0        $0.0320│
+├────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ [q] quit  [c] clear  [p] pause  [↑/↓] scroll viewport                                          │
+└────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
 
-### 6.3 Cost Calculation Formula
-```go
-func CalculateCost(usage TokenUsage, rate ModelRate) (grossUSD, netUSD float64) {
-    // Gross: Assumes all prompt tokens charged at standard input rate
-    totalPrompt := float64(usage.InputTokens + usage.CacheReadTokens + usage.CacheCreationTokens)
-    grossUSD = (totalPrompt / 1_000_000.0) * rate.InputCostPerM +
-               (float64(usage.OutputTokens) / 1_000_000.0) * rate.OutputCostPerM
+### 5.3 Responsive Breakpoint Adaptations
+- **Wide ($\ge 120$ cols)**: 3-column KPI cards, full model name strings, detailed token breakdown.
+- **Medium ($80-119$ cols)**: 2-column KPI cards, consolidated token counts (`In/Out/Cache`), truncated project basenames.
+- **Narrow ($< 80$ cols)**: Stacked KPI banner, truncated model strings (`claude-3-7...`), compact status indicators.
 
-    // Net: Accounts for discounted cache reads and cache write premiums
-    readRate := rate.CacheReadCostPerM
-    if readRate == 0 && rate.InputCostPerM > 0 {
-        readRate = rate.InputCostPerM * 0.10 // 90% discount fallback
-    }
-    writeRate := rate.CacheWriteCostPerM
-    if writeRate == 0 && rate.InputCostPerM > 0 {
-        writeRate = rate.InputCostPerM * 1.25 // 25% cache write markup fallback
-    }
+---
 
-    netUSD = (float64(usage.InputTokens) / 1_000_000.0) * rate.InputCostPerM +
-             (float64(usage.CacheReadTokens) / 1_000_000.0) * readRate +
-             (float64(usage.CacheCreationTokens) / 1_000_000.0) * writeRate +
-             (float64(usage.OutputTokens) / 1_000_000.0) * rate.OutputCostPerM
+## 6. Production Packaging & Kubernetes Deployment
 
-    return grossUSD, netUSD
-}
+### 6.1 Multi-Stage `Dockerfile` (`deploy/Dockerfile`)
+```dockerfile
+# Stage 1: Build Astro Static Frontend
+FROM node:20-alpine AS frontend-builder
+WORKDIR /app/frontend
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+# Stage 2: Compile Pure-Go Hub Binary
+FROM golang:1.24-alpine AS backend-builder
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+COPY --from=frontend-builder /app/internal/web/dist ./internal/web/dist
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /bin/tt-server ./cmd/tt-server
+
+# Stage 3: Minimal Production Image
+FROM alpine:3.20
+RUN apk --no-cache add ca-certificates tzdata
+WORKDIR /app
+COPY --from=backend-builder /bin/tt-server /usr/local/bin/tt-server
+EXPOSE 8000
+VOLUME ["/data"]
+ENV TT_DB_PATH=/data/tokentelemetry.db
+ENTRYPOINT ["/usr/local/bin/tt-server", "--db", "/data/tokentelemetry.db", "--port", "8000"]
+```
+
+### 6.2 Kubernetes Deployment & PVC Manifests (`deploy/k8s/`)
+
+#### PersistentVolumeClaim (`deploy/k8s/pvc.yaml`)
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: tokentelemetry-data
+  namespace: telemetry
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+```
+
+#### Deployment & Service (`deploy/k8s/deployment.yaml`)
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tokentelemetry-hub
+  namespace: telemetry
+  labels:
+    app: tokentelemetry-hub
+spec:
+  replicas: 1  # Single replica for SQLite WAL single-writer architecture
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: tokentelemetry-hub
+  template:
+    metadata:
+      labels:
+        app: tokentelemetry-hub
+    spec:
+      containers:
+        - name: hub
+          image: ghcr.io/robin-paul/tokentelemetry-hub:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: TT_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: tokentelemetry-secrets
+                  key: auth-token
+                  optional: true
+          volumeMounts:
+            - name: data-volume
+              mountPath: /data
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8000
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "1000m"
+              memory: "512Mi"
+      volumes:
+        - name: data-volume
+          persistentVolumeClaim:
+            claimName: tokentelemetry-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tokentelemetry-hub
+  namespace: telemetry
+spec:
+  type: ClusterIP
+  selector:
+    app: tokentelemetry-hub
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
 ```
 
 ---
 
-## 7. REST API & SSE Streaming Specification
+## 7. Unified Makefile Targets
 
-### 7.1 Core Endpoint Catalog
-
-| Method | Path | Description |
-| :--- | :--- | :--- |
-| `GET` | `/healthz` | Health check (`{"status":"ok","version":"1.0.0"}`) |
-| `GET` | `/api/sessions` | Paginated sessions (`?page=1&limit=50&agent=&project=&from=&to=`) |
-| `GET` | `/api/sessions/{id}` | Detailed session view with turns, subagent runs, and tool usage |
-| `GET` | `/api/recent` | Recent 20 sessions for dashboard live feed |
-| `GET` | `/api/stats` | Aggregated metrics (total tokens, gross/net cost, active agents) |
-| `GET` | `/api/stats/daily` | Time-series daily token & cost breakdowns for Recharts |
-| `GET` | `/api/leaderboard` | Top models and top agents by token consumption |
-| `GET` | `/api/projects` | Catalog of discovered projects with token/cost aggregates |
-| `GET` | `/api/projects/{path...}` | Specific project summary and session list |
-| `GET` | `/api/hermes/kanban` | Hermes task status columns and run summaries |
-| `GET` | `/api/pricing` | Current resolved model pricing rates |
-| `POST` | `/api/pricing/override` | Set custom model price override |
-| `GET` | `/events` | Server-Sent Events (SSE) live telemetry stream |
-
-### 7.2 SSE Broker Architecture
-The SSE Hub maintains a thread-safe subscriber registry:
-- **Keepalive**: Broadcasts a comment heartbeat (`: ping\n\n`) every 15 seconds.
-- **Client Channels**: Buffered channel (size: 64) per client. Slow consumers are safely dropped without blocking the scanner worker pool.
-- **Events Emitted**:
-  - `session.created`: Emitted when a new agent transcript is first detected.
-  - `session.updated`: Emitted when new token deltas are parsed for an active session.
-  - `scan.progress`: Emitted during full filesystem scan indexing.
-
----
-
-## 8. Astro Frontend & Go Embedding Integration
-
-### 8.1 Astro Configuration (`frontend/astro.config.mjs`)
-```javascript
-import { defineConfig } from 'astro/config';
-import react from '@astrojs/react';
-import tailwind from '@astrojs/tailwind';
-
-export default defineConfig({
-  output: 'static',
-  outDir: '../internal/web/dist',
-  integrations: [
-    react(),
-    tailwind({ applyBaseStyles: false })
-  ],
-  vite: {
-    server: {
-      proxy: {
-        '/api': 'http://localhost:8000',
-        '/events': 'http://localhost:8000',
-        '/healthz': 'http://localhost:8000'
-      }
-    }
-  }
-});
-```
-
-### 8.2 Go HTTP Asset & SPA Fallback Handler (`internal/web/assets.go`)
-```go
-package web
-
-import (
-    "embed"
-    "io/fs"
-    "net/http"
-    "path"
-    "strings"
-)
-
-//go:embed all:dist
-var distFS embed.FS
-
-func Handler() http.Handler {
-    subFS, err := fs.Sub(distFS, "dist")
-    if err != nil {
-        panic(err)
-    }
-
-    fileServer := http.FileServer(http.FS(subFS))
-
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        reqPath := path.Clean(r.URL.Path)
-
-        // 1. Static asset caching
-        if strings.HasPrefix(reqPath, "/_astro/") || strings.HasPrefix(reqPath, "/assets/") {
-            w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-            fileServer.ServeHTTP(w, r)
-            return
-        }
-
-        // 2. Check if file exists directly in embed.FS
-        f, err := subFS.Open(strings.TrimPrefix(reqPath, "/"))
-        if err == nil {
-            _ = f.Close()
-            w.Header().Set("Cache-Control", "no-cache")
-            fileServer.ServeHTTP(w, r)
-            return
-        }
-
-        // 3. Dynamic route fallbacks for React client islands
-        if strings.HasPrefix(reqPath, "/sessions/") {
-            r.URL.Path = "/sessions/[id]/index.html"
-        } else if strings.HasPrefix(reqPath, "/projects/") {
-            r.URL.Path = "/projects/[...path]/index.html"
-        } else {
-            // Default 404 / root fallback
-            r.URL.Path = "/index.html"
-        }
-
-        w.Header().Set("Cache-Control", "no-cache")
-        fileServer.ServeHTTP(w, r)
-    })
-}
-```
-
----
-
-## 9. Build, Test, and Packaging Automation
-
-### 9.1 Unified `Makefile`
 ```makefile
 VERSION ?= 1.0.0
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 LDFLAGS = -s -w -X main.Version=$(VERSION) -X main.Commit=$(COMMIT)
 
-.PHONY: all build-frontend build-backend build test clean
+.PHONY: all build-frontend build-server build-cli build-all test clean docker-build
 
-all: build
+all: build-all
 
 build-frontend:
 	@echo "==> Building Astro Static Frontend..."
 	cd frontend && npm ci && npm run build
 
-build-backend:
-	@echo "==> Compiling Static Go Binary..."
-	CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -o bin/tokentelemetry ./cmd/tokentelemetry
+build-server: build-frontend
+	@echo "==> Compiling Hub Server Binary (bin/tt-server)..."
+	CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -o bin/tt-server ./cmd/tt-server
 
-build: build-frontend build-backend
-	@echo "==> Build complete: bin/tokentelemetry"
+build-cli:
+	@echo "==> Compiling Collector CLI Binary (bin/tt)..."
+	CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -o bin/tt ./cmd/tt
+
+build-all: build-server build-cli
+	@echo "==> Successfully built bin/tt and bin/tt-server"
 
 test:
 	go test -v -race ./internal/...
+
+docker-build:
+	docker build -t tokentelemetry-hub:$(VERSION) -f deploy/Dockerfile .
 
 clean:
 	rm -rf bin/ internal/web/dist frontend/dist
@@ -567,35 +496,28 @@ clean:
 
 ---
 
-## 10. Step-by-Step Autonomous Implementation Roadmap
+## 8. Phased Implementation Roadmap
 
-An autonomous coding agent executing this port must follow these sequential phases:
+The execution tickets for this architecture proceed sequentially:
 
-### Phase 1: Core Foundation & Storage Layer
-1. Initialize Go module `github.com/robin-paul/tokentelemetry`.
-2. Implement `internal/store` with `modernc.org/sqlite`, connection pool, and `0001_initial.sql` migrations.
-3. Add unit tests for SQLite CRUD operations, composite indexes, and concurrency under WAL mode.
+### Phase 1: Ingestion API & Client Buffer ([#28](https://github.com/robin-paul/token-analyzer/issues/28))
+1. Implement `models.IngestionBatch`, `models.ClientMetadata`, and `models.IngestionResponse` in `internal/models/ingest.go`.
+2. Add migration `0003_collector_ingest.sql` adding `machine_id` to `sessions`.
+3. Implement `POST /api/v1/ingest` in `internal/api/ingest.go` with single-writer upserts and SSE broadcast.
+4. Implement `internal/client/ingest.go` and `internal/client/buffer.go` with dual-trigger batching and full-jitter retries.
 
-### Phase 2: Pricing & Power Engine
-1. Embed `pricing_data.json` inside `internal/pricing`.
-2. Implement fuzzy longest-prefix model resolver and `CalculateCost` with net/gross cache multipliers.
-3. Implement hardware profile electricity cost estimator with fallback defaults.
+### Phase 2: Cobra Command Tree in `cmd/tt` ([#29](https://github.com/robin-paul/token-analyzer/issues/29))
+1. Scaffold `cmd/tt` with Cobra root command and subcommands (`watch`, `scan`, `config`, `status`, `send`).
+2. Implement configuration loader for `~/.tokentelemetry/config.yaml`.
+3. Implement `collector.RunHeadless` daemon mode with structured `slog`.
 
-### Phase 3: Agent Parsers & Scanner Concurrency
-1. Implement universal `AgentParser` interface.
-2. Implement parsers for all 18+ agent ecosystems (`claude.go`, `antigravity.go`, `gemini.go`, `codex.go`, `cursor.go`, etc.).
-3. Implement `internal/scanner/checkpoint.go` and the `fsnotify` + reconciler worker pool in `internal/watcher`.
+### Phase 3: Charm Bubble Tea TUI Monitor ([#30](https://github.com/robin-paul/token-analyzer/issues/30))
+1. Implement `internal/tui/model.go` state machine with `table.Model`, metrics accumulators, and keybindings.
+2. Implement Lip Gloss responsive layout renderer in `internal/tui/view.go`.
+3. Wire `TUISink` with `tea.Program.Send` to stream live turns into the terminal.
 
-### Phase 4: REST API Handlers & SSE Broker
-1. Implement `internal/events/broker.go` with thread-safe client subscription channels and 15s keepalive pings.
-2. Implement `chi` REST routing and 40+ API endpoints in `internal/api/`.
-3. Add Bearer token authentication and CORS middleware.
-
-### Phase 5: Astro Frontend Migration & Go Embedding
-1. Initialize `frontend/` with Astro static export and `@astrojs/react`.
-2. Port React UI components, Recharts visualizations, and Session Inspector scrubber to Astro client islands.
-3. Configure `internal/web/assets.go` with `//go:embed all:dist` and SPA fallback routing.
-
-### Phase 6: End-to-End Validation & Verification
-1. Run `make build` to verify single-binary compilation.
-2. Launch `bin/tokentelemetry --port 8000` and execute integration test verifying live log scanning, SQLite persistence, SSE broadcast, and Web dashboard rendering.
+### Phase 4: Packaging, Makefile & Kubernetes Manifests ([#31](https://github.com/robin-paul/token-analyzer/issues/31))
+1. Rename/refactor `cmd/tokentelemetry` $\rightarrow$ `cmd/tt-server`.
+2. Update `Makefile` with `build-cli`, `build-server`, and `build-all`.
+3. Author `deploy/Dockerfile` and `deploy/k8s/` manifests.
+4. Write end-to-end integration test validating `bin/tt` streaming into `bin/tt-server`.
