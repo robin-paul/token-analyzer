@@ -102,6 +102,17 @@ The Collector CLI watches local transcripts and transmits telemetry to the Hub.
 
 ---
 
+### C. Stopping Running Processes (`make kill` / `make stop`)
+
+To terminate all running `tt-server`, `tokentelemetry`, and `tt` instances and free port `8000`:
+
+```bash
+make kill
+# or: make stop
+```
+
+---
+
 ## 4. Manual Functional Verification Checklist
 
 ### Phase 1: CLI Configuration & Environment Status (`tt config`, `tt status`)
