@@ -278,6 +278,26 @@ Verify Hub endpoints using `curl`:
   curl -s http://localhost:8000/api/leaderboard | jq .
   curl -s http://localhost:8000/api/projects | jq .
   ```
+- [ ] **SQLite FTS5 Search & Multi-Faceted Query Filtering**:
+  ```bash
+  # Full-text keyword search across project, model, branch, session ID
+  curl -s "http://localhost:8000/api/sessions?q=fix" | jq .
+
+  # Multi-faceted filter by agent, model, cost bounds, token bounds, and sorting
+  curl -s "http://localhost:8000/api/sessions?agent=claude_code&model=claude-3-7-sonnet&min_cost=0.01&max_cost=5.00&sort_by=cost&sort_order=desc" | jq .
+
+  # Paginated metadata format
+  curl -s "http://localhost:8000/api/sessions?page=1&limit=10&format=paginated" | jq .
+  ```
+- [ ] **Deep Session & Turn Ingestion Inspection**:
+  ```bash
+  # Retrieve session details with rich message turns
+  SESSION_ID=$(curl -s http://localhost:8000/api/recent | jq -r '.[0].session_id')
+  curl -s "http://localhost:8000/api/sessions/${SESSION_ID}" | jq .
+
+  # Verify deep turn fields (thinking, reasoning_effort, tool_calls, tool_results, raw_payload)
+  curl -s "http://localhost:8000/api/sessions/${SESSION_ID}" | jq '.turns[0] | {role, model, thinking, reasoning_effort, tool_calls, tool_results}'
+  ```
 - [ ] **Pricing Catalog & Overrides API**:
   ```bash
   # Fetch embedded pricing catalog
@@ -313,28 +333,69 @@ Open **`http://localhost:8000/`** in a web browser:
   - KPI summary cards display Total Net Cost, Input Tokens, Output Tokens, and Cache Efficiency.
   - Recent Sessions feed lists latest agent executions with badge icons (Claude, Gemini, Antigravity, etc.).
   - Real-time indicator confirms active SSE connection and dynamically refreshes when turns arrive.
-- [ ] **Sessions Explorer (`/sessions` & `/sessions/:id`)**:
-  - Filter sessions by Agent, Model, and Project name.
-  - Open a session detail view: inspect turn-by-turn prompt inputs, assistant outputs, tool calls, and individual turn token costs.
-  - For multi-agent sessions, verify subagent hierarchy trees and delegation trace views.
-- [ ] **Projects View (`/projects` & `/projects/*`)**:
-  - Verify sessions are grouped by repository/project directory.
-  - Click into a specific project to verify project-level aggregated cost and token consumption.
+- [ ] **Sessions Catalog & Search (`/sessions`)**:
+  - **Debounced Search Bar**: Type in the search input (e.g. prompt keywords, branch name, session ID); verify query executes with 300ms debounce and updates the URL query string (`?q=...`).
+  - **Multi-Criteria Filter Dropdowns**:
+    - Filter by Agent badge pills (e.g., Claude Code, Antigravity, Cursor).
+    - Filter by Model dropdown selector.
+    - Filter by Date range presets (Today, Last 7 Days, Last 30 Days, All Time).
+    - Filter by Cost range bounds ($Min – $Max).
+    - Filter by Total Tokens volume.
+  - **Sorting & Order Controls**: Toggle sort dimension (`start_time`, `cost`, `tokens`, `duration`, `relevance`) and sort direction (ASC/DESC); verify table rows sort reactively.
+  - **Session Card Previews**: Verify prompt snippet preview (`"Fix checkout flow..."`), model badges, token counts, cost chips, and relative timestamps.
+- [ ] **Deep Session Inspector (`/sessions/:id`)**:
+  - **Turn Scrubber & Playback Controls**:
+    - Scrub the timeline slider ($0 \dots N$); verify playhead updates smoothly with RAF debouncing.
+    - Click Play/Pause; verify the auto-stepper plays turns forward at 600ms intervals.
+    - Verify high-water mark indicator (`revealedCount`) prevents turn DOM unmounting when scrubbing backwards.
+  - **Category Filter Portal**:
+    - Open Step Filter Popover; toggle category pills (`All`, `User`, `Assistant`, `Tools`, `Thinking`, `Errors`).
+    - Verify only turns matching selected categories remain visible in the stream.
+  - **In-Trace Keyword Search**:
+    - Type query in `TurnSearchInput`; verify matching text is highlighted in cards and step navigation auto-focuses matching turns.
+  - **Rich Message Turn Cards**:
+    - `UserTurnCard`: Displays formatted user prompt text and turn timestamp.
+    - `AssistantTurnCard`: Markdown response rendering (code blocks, tables, lists) and turn-level token/cost metrics.
+    - `ReasoningCard`: Collapsible thought reasoning block with duration chip and effort indicator.
+    - `ToolInvocationCard`: Paired tool call and tool result cards with collapsible JSON arguments, terminal stdout/stderr diff lines, error badge states, and execution duration chips.
+  - **Execution Waterfall Timeline**:
+    - Verify bottom Gantt chart renders tool execution spans across turn timeline.
+    - Click a timeline bar; verify canvas smoothly scrolls to seek that turn.
+  - **Inspector Sidebar**:
+    - **Context Tab**: Displays session UUID, git branch, project workspace, tokens (in/out/cache), and net cost.
+    - **Tools Histogram Tab**: Lists all invoked tools with count frequencies and cumulative duration; click tool to jump to turn.
+    - **Artifacts Gallery Tab**: Displays generated file artifacts, markdown plans, and image links.
+    - **Raw JSON Tab**: Syntax-highlighted raw JSON payload with one-click copy button.
+  - **Portalled Artifact Lightbox Modal**:
+    - Click an artifact / plan link; verify fullscreen lightbox opens with zoom controls, syntax highlighting, diff viewer, and media playback.
+- [ ] **Project Workspaces (`/projects` & `/projects/*`)**:
+  - **Git Worktree Aggregation**: Verify worktrees belonging to the same root repository are aggregated under the canonical parent project card with rollup metrics (∑ sessions, tokens, total cost).
+  - **View Mode Toggle**: Toggle between **Grid Cards** and **Dense Table** view modes; verify preference persists across page reloads via `sessionStorage`.
+  - **Multi-Column Sorting**: Sort projects by total spend, token volume, session count, or last active timestamp.
+  - **Project Detail Sub-Tabs**:
+    - **Activity Tab**: Recent sessions and executions within the workspace.
+    - **Plans Tab**: Extracted design docs and plan artifacts.
+    - **Config Tab**: Workspace settings, detection paths, and telemetry configuration.
+    - Verify switching tabs synchronizes the URL (`?tab=activity|plans|config`).
 - [ ] **Analytics View (`/analytics`)**:
-  - Verify daily spend and cumulative token consumption trend charts.
-  - Verify Model Leaderboard rankings (prompt/completion tokens, cache hit rate, total cost).
-  - Verify date range selector updates metrics.
+  - **Time Range Presets**: Toggle between `7d`, `30d`, `90d`, and `All`; verify summary stats and charts update reactively.
+  - **Stacked Token AreaCharts**: Verify time series charts displaying Prompt Tokens, Completion Tokens, and Cache Read Tokens.
+  - **Leaderboards**: Verify Model Leaderboard and Agent Leaderboard rankings with sorting by spend, token volume, cache hit rate, and session count.
 - [ ] **Hermes Agent Hub (`/hermes`)**:
   - Verify Hermes task Kanban board states (`pending`, `in_progress`, `completed`, `failed`).
   - Verify agent skills table, telemetry stats, and memory summaries.
 - [ ] **Settings & Configuration (`/settings`)**:
-  - Pricing Overrides: view catalog rates, add a custom pricing rule, and verify it persists in SQLite.
-  - Hardware Power Profiler: set device TDP (W) and electricity rate ($/kWh); verify estimated electricity cost displays.
-  - Budget & Retention: verify budget threshold controls and log retention settings.
+  - **Interactive Pricing Overrides Editor**:
+    - View default pricing catalog rates in table.
+    - Add a custom pricing override rule (e.g. `custom-model-*`) via the UI form.
+    - Verify newly created override appears in table and persists across page reloads.
+    - Edit and delete custom overrides directly in the UI.
+  - **Hardware Power Profiler**: Set device TDP (W) and electricity rate ($/kWh); verify estimated electricity cost displays.
+  - **Budget & Retention**: Verify budget threshold alerts and log retention policy controls.
 
 ---
 
-## 6. Automated Test Suites
+## 5. Automated Test Suites
 
 Run automated verification test suites across the repository:
 
@@ -344,7 +405,7 @@ Run automated verification test suites across the repository:
   make test
   # or: go test -v -race ./...
   ```
-  - Validates parsers (Antigravity, Claude, Gemini, Cursor, Codex, Copilot, Hermes, etc.), pricing engine, SQLite store/migrations, events broker, and collector pipeline.
+  - Validates parsers (Antigravity, Claude, Gemini, Cursor, Codex, Copilot, Hermes, etc.), pricing engine, SQLite store/migrations (including FTS5 & Turn schemas), events broker, and collector pipeline.
 
 - [ ] **End-to-End CLI-to-Hub Streaming Test**:
   ```bash
@@ -353,10 +414,25 @@ Run automated verification test suites across the repository:
   ```
   - Spawns a transient Hub instance, tests ping health, synthetic session generation, real log ingestion, daily summary rollup, and Bearer token auth rejection.
 
-- [ ] **Playwright End-to-End Web UI Suite**:
+- [ ] **Playwright Regression & End-to-End Web UI Suite**:
   ```bash
   cd repositories/tokentelemetry-go
   make test-ui
-  # or smoke tests:
+  # or run specific test suites:
+  cd test/playwright && npm run test:regression
+  ```
+
+- [ ] **Dual-Server Playwright Visual Regression Diff Suite**:
+  ```bash
+  cd repositories/tokentelemetry-go
+  make test-ui-visual
+  ```
+  - Concurrently spins up the Next.js baseline server (`:3000`) and candidate Go Astro server (`:8000`).
+  - Executes 15 standardized visual test cases (Dashboard, Sessions catalog, Session Inspector, Projects, Analytics, Settings, Nav collapsed).
+  - Performs pixelmatch diffing and outputs composite side-by-side screenshots and an interactive HTML audit report to `artifacts/visual-diff/index.html`.
+
+- [ ] **Playwright Smoke Tests**:
+  ```bash
+  cd repositories/tokentelemetry-go
   make test-ui-smoke
   ```
