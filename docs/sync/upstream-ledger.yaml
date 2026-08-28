@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=./upstream-ledger.schema.json
 schema_version: 1.0.0
 generated_at: '2026-08-27T01:51:25.380863+00:00'
-last_updated_at: '2026-08-28T21:04:58.512435+00:00'
+last_updated_at: '2026-08-28T21:20:33.750777+00:00'
 repository:
   upstream_path: repositories/tokentelemetry
   downstream_path: repositories/tokentelemetry-go
@@ -13,13 +13,13 @@ repository:
 summary:
   total_commits: 426
   total_pull_requests: 84
-  actionable_delta_count: 2
-  ported_count: 303
+  actionable_delta_count: 0
+  ported_count: 305
   in_progress_count: 0
   deferred_count: 0
   skipped_not_applicable_count: 121
   un_triaged_count: 0
-  parity_percentage: 99.5
+  parity_percentage: 100.0
 pull_requests:
 - pr_number: 301
   title: 'Merge pull request #301 from VasiHemanth/fix/lock-version-guard'
@@ -1318,12 +1318,13 @@ commits:
   - backend/api
   - frontend/inspector
   - other
-  status: actionable_delta
+  status: ported
   confidence_score: 0.99
   target_go_files:
   - internal/scanner/parsers/dsh.go
   resolution:
     notes: Report DSH real runtime capabilities from session configuration.
+    go_commit_sha: aacef19
 - sha: 75541497e07b0325bc6f5d3fb53b8ed797c0bd6e
   short_sha: '7554149'
   author: Hemanth Vasi <hemanth.vasi1716@gmail.com>
@@ -1335,7 +1336,7 @@ commits:
   - frontend/core
   - frontend/inspector
   - other
-  status: actionable_delta
+  status: ported
   confidence_score: 0.99
   target_go_files:
   - internal/scanner/parsers/dsh.go
@@ -1343,6 +1344,7 @@ commits:
   resolution:
     notes: Surface DeepSeek Harness across agent lists, trace views, and subagent
       delegation trees.
+    go_commit_sha: aacef19
 - sha: f9f6a1fde567a6cae32bca76af0879a9cbf71fa7
   short_sha: f9f6a1f
   author: Hemanth Vasi <hemanth.vasi1716@gmail.com>
