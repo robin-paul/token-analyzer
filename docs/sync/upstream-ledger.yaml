@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=./upstream-ledger.schema.json
 schema_version: 1.0.0
 generated_at: '2026-08-27T01:51:25.380863+00:00'
-last_updated_at: '2026-08-28T19:12:46.163411+00:00'
+last_updated_at: '2026-08-28T19:22:29.951304+00:00'
 repository:
   upstream_path: repositories/tokentelemetry
   downstream_path: repositories/tokentelemetry-go
@@ -13,13 +13,13 @@ repository:
 summary:
   total_commits: 426
   total_pull_requests: 84
-  actionable_delta_count: 9
-  ported_count: 296
+  actionable_delta_count: 8
+  ported_count: 297
   in_progress_count: 0
   deferred_count: 0
   skipped_not_applicable_count: 121
   un_triaged_count: 0
-  parity_percentage: 97.9
+  parity_percentage: 98.1
 pull_requests:
 - pr_number: 301
   title: 'Merge pull request #301 from VasiHemanth/fix/lock-version-guard'
@@ -1127,13 +1127,15 @@ commits:
   - backend/api
   - backend/store
   - other
-  status: actionable_delta
+  status: ported
   confidence_score: 0.99
   target_go_files:
   - internal/api/projects.go
   - internal/store/sessions.go
   resolution:
-    notes: Normalize Windows vs POSIX path separators to unify project identity.
+    notes: Ported canonical project path normalization, migration 0006, and cross-separator
+      hiding/filters
+    go_commit_sha: 1e818498c6211e89b6ccad4d206bd4cbabddf62e
 - sha: 8b9688d2d3ab598169eda539350dad2c8134547d
   short_sha: 8b9688d
   author: Siren.W <sirenexcelsior@gmail.com>
