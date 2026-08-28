@@ -14,6 +14,7 @@ TokenTelemetry is organized as a high-performance distributed telemetry system:
 - **Collector (`tt`)**: Local developer workstation CLI utility that passively monitors agent transcript directories, parses message turns, calculates offline financial costs, renders an interactive terminal UI (TUI), and streams ingestion batches to the Hub.
 - **Hub (`tt-server`)**: Centralized telemetry backend server deployed locally or remotely, providing SQLite persistence with WAL mode, REST and SSE APIs, analytics rollups, and serving the embedded Astro Web UI.
 - **Embedded Astro Frontend**: Modern reactive Web UI embedded directly inside the `tt-server` binary via Go `embed`.
+- **Upstream Sync & Parity Toolset (`upstream-sync.py`)**: Local-first CLI toolset (`scripts/upstream-sync.py`) and sync ledger (`docs/sync/upstream-ledger.yaml`) that tracks upstream deltas, enforces 100% feature parity, validates schema invariants, and drafts porting specifications.
 
 ---
 
@@ -160,6 +161,11 @@ make kill
   - Confirm scan discovers transcript files across configured roots.
   - Verify printed metrics: `Files Discovered`, `Sessions Parsed`, `Message Turns`, `Input/Output/Cache Tokens`, `Estimated Cost ($USD)`, and `Scan Duration`.
   - Confirm mode displays `DRY RUN (No batches sent to Hub)`.
+- [ ] **Grok Billed Usage & Long-Context Tier Parsing**:
+  - Scan transcripts containing `~/.grok/logs/unified.jsonl` inference events (`shell.turn.inference_done`).
+  - Verify parsed sessions apply accurate tiered pricing (including xAI 128k+ long-context pricing rules) rather than raw token approximations.
+- [ ] **Cross-Platform Canonical Project Path Normalization**:
+  - Verify scan normalizes Windows backslash (`\`) and POSIX forward slash (`/`) project root paths into a unified canonical path format at ingestion.
 - [ ] **JSON Summary Output**:
   ```bash
   ./bin/tt scan --dry-run --json
@@ -204,6 +210,8 @@ make kill
   ```bash
   ./bin/tt sessions --plain --harness antigravity --limit 3
   ./bin/tt sessions --plain --harness claude_code --limit 3
+  ./bin/tt sessions --plain --harness grok --limit 3
+  ./bin/tt sessions --plain --harness dsh --limit 3
   ```
   - Verify only sessions matching the specified agent harness are displayed.
 - [ ] **Antigravity Dynamic Model Verification**:
@@ -297,6 +305,15 @@ Verify Hub endpoints using `curl`:
 
   # Verify deep turn fields (thinking, reasoning_effort, tool_calls, tool_results, raw_payload)
   curl -s "http://localhost:8000/api/sessions/${SESSION_ID}" | jq '.turns[0] | {role, model, thinking, reasoning_effort, tool_calls, tool_results}'
+  
+  # Verify DSH telemetry & posture fields (ttft_ms, generation_throughput, llm_time_ms, tool_time_ms, cache_hit_rate, sandbox_mode, approval_policy, effective_preset, preset_chain)
+  curl -s "http://localhost:8000/api/sessions/${SESSION_ID}" | jq '{id, ttft_ms, generation_throughput, llm_time_ms, tool_time_ms, cache_hit_rate, sandbox_mode, approval_policy, effective_preset, preset_chain}'
+  ```
+- [ ] **DSH Plugin Lifecycle Ingestion Endpoints**:
+  ```bash
+  # Ingested transitions from ~/.tokentelemetry/dsh_lifecycle.jsonl
+  curl -s http://localhost:8000/dsh/lifecycle | jq .
+  curl -s http://localhost:8000/api/dsh/lifecycle | jq .
   ```
 - [ ] **Pricing Catalog & Overrides API**:
   ```bash
@@ -344,6 +361,16 @@ Open **`http://localhost:8000/`** in a web browser:
   - **Sorting & Order Controls**: Toggle sort dimension (`start_time`, `cost`, `tokens`, `duration`, `relevance`) and sort direction (ASC/DESC); verify table rows sort reactively.
   - **Session Card Previews**: Verify prompt snippet preview (`"Fix checkout flow..."`), model badges, token counts, cost chips, and relative timestamps.
 - [ ] **Deep Session Inspector (`/sessions/:id`)**:
+  - **Split View Layout (Dialogue vs Brain)**:
+    - Toggle split view button; verify Dialogue (user & assistant conversation turns) and Brain (internal thoughts, reasoning, and tool calls) render in dedicated side-by-side columns.
+  - **Sequential Timeline Staggering**:
+    - When Split View is enabled, toggle presentation mode between **Sequential Flow** and **Parallel Columns**.
+    - In **Sequential Flow**, verify mixed turns stagger chronologically (Brain reasoning/tools appear first on the right $\rightarrow$ Assistant response follows on the left).
+  - **DSH Telemetry & Posture Display**:
+    - In **Context Tab**: Verify TTFT, generation throughput (excluding TTFT), LLM vs Tool time breakdown, and cache hit percentage badges.
+    - In **Context & Subagents Tabs**: Verify sandbox mode, approval policy, permission presets, effective preset chain, and delegated posture inheritance (`source: "delegation"`).
+  - **DSH Plugin Lifecycle Panel**:
+    - In **Context Tab**: Verify plugin inventory table, Cordis FiberState statuses (`active`, `loading`, `failed`, `unloaded`), transition metrics, and time-window correlation with active session.
   - **Turn Scrubber & Playback Controls**:
     - Scrub the timeline slider ($0 \dots N$); verify playhead updates smoothly with RAF debouncing.
     - Click Play/Pause; verify the auto-stepper plays turns forward at 600ms intervals.
@@ -369,7 +396,7 @@ Open **`http://localhost:8000/`** in a web browser:
   - **Portalled Artifact Lightbox Modal**:
     - Click an artifact / plan link; verify fullscreen lightbox opens with zoom controls, syntax highlighting, diff viewer, and media playback.
 - [ ] **Project Workspaces (`/projects` & `/projects/*`)**:
-  - **Git Worktree Aggregation**: Verify worktrees belonging to the same root repository are aggregated under the canonical parent project card with rollup metrics (∑ sessions, tokens, total cost).
+  - **Git Worktree & Canonical Path Aggregation**: Verify worktrees belonging to the same root repository and paths with differing Windows/POSIX separators fold into the canonical parent project card with rollup metrics (∑ sessions, tokens, total cost).
   - **View Mode Toggle**: Toggle between **Grid Cards** and **Dense Table** view modes; verify preference persists across page reloads via `sessionStorage`.
   - **Multi-Column Sorting**: Sort projects by total spend, token volume, session count, or last active timestamp.
   - **Project Detail Sub-Tabs**:
@@ -395,9 +422,55 @@ Open **`http://localhost:8000/`** in a web browser:
 
 ---
 
+### Phase 8: Upstream Synchronization & Parity Toolset (`upstream-sync.py`)
+
+Verify the zero-network local sync and parity tracking toolset:
+
+- [ ] **Parity Status Inspection (`upstream-sync.py status`)**:
+  ```bash
+  uv run scripts/upstream-sync.py status
+  ```
+  - Confirm output reports **100.0% parity** across all 426 upstream commits and 84 PRs with `0 Actionable Deltas`.
+- [ ] **Schema & Ledger Invariant Validation (`upstream-sync.py validate`)**:
+  ```bash
+  uv run scripts/upstream-sync.py validate
+  ```
+  - Verify `docs/sync/upstream-ledger.yaml` passes Pydantic schema validation, SHA uniqueness, commit topological ordering, and PR consistency rules.
+- [ ] **Commit Catalog Listing & Filtering (`upstream-sync.py list`)**:
+  ```bash
+  uv run scripts/upstream-sync.py list --status ported --limit 5
+  uv run scripts/upstream-sync.py list --status skipped --limit 5
+  uv run scripts/upstream-sync.py list --focus-area dsh_telemetry
+  ```
+  - Verify output displays tabular list with SHA, commit summary, author date, port status, and mapped Go target files.
+- [ ] **Local Offline Git Diff (`upstream-sync.py diff`)**:
+  ```bash
+  uv run scripts/upstream-sync.py diff cecce1c
+  ```
+  - Verify diff inspection displays changes against Go counterpart files without requiring network access.
+- [ ] **Parity Audit Reporting & Spec Generation (`upstream-sync.py report`)**:
+  ```bash
+  uv run scripts/upstream-sync.py report
+  ```
+  - Confirm markdown parity report generation with subsystem coverage matrix and parity scores.
+
+---
+
 ## 5. Automated Test Suites
 
 Run automated verification test suites across the repository:
+
+- [ ] **Upstream Sync Ledger & Invariants**:
+  ```bash
+  uv run scripts/upstream-sync.py validate
+  ```
+  - Validates ledger invariants, commit topological order, and PR consistency.
+
+- [ ] **Workspace Alignment & Pre-Commit Hooks**:
+  ```bash
+  uv run pre-commit run --all-files
+  ```
+  - Verifies workspace alignment, docs, skills, and command configurations.
 
 - [ ] **Go Unit & Integration Test Suite**:
   ```bash
@@ -405,7 +478,7 @@ Run automated verification test suites across the repository:
   make test
   # or: go test -v -race ./...
   ```
-  - Validates parsers (Antigravity, Claude, Gemini, Cursor, Codex, Copilot, Hermes, etc.), pricing engine, SQLite store/migrations (including FTS5 & Turn schemas), events broker, and collector pipeline.
+  - Validates parsers (Antigravity, Claude, Gemini, Cursor, Codex, Copilot, Hermes, Grok, DSH), pricing engine (including Grok long-context tiers), SQLite store/migrations (including FTS5, Turn schemas, and Canonical Project Paths), events broker, DSH lifecycle ingestion, and collector pipeline.
 
 - [ ] **End-to-End CLI-to-Hub Streaming Test**:
   ```bash
