@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=./upstream-ledger.schema.json
 schema_version: 1.0.0
 generated_at: '2026-08-27T01:51:25.380863+00:00'
-last_updated_at: '2026-08-28T19:49:13.910860+00:00'
+last_updated_at: '2026-08-28T20:50:14.565293+00:00'
 repository:
   upstream_path: repositories/tokentelemetry
   downstream_path: repositories/tokentelemetry-go
@@ -13,13 +13,13 @@ repository:
 summary:
   total_commits: 426
   total_pull_requests: 84
-  actionable_delta_count: 6
-  ported_count: 299
+  actionable_delta_count: 5
+  ported_count: 300
   in_progress_count: 0
   deferred_count: 0
   skipped_not_applicable_count: 121
   un_triaged_count: 0
-  parity_percentage: 98.6
+  parity_percentage: 98.8
 pull_requests:
 - pr_number: 301
   title: 'Merge pull request #301 from VasiHemanth/fix/lock-version-guard'
@@ -1244,12 +1244,14 @@ commits:
   - backend/api
   - frontend/inspector
   - other
-  status: actionable_delta
+  status: ported
   confidence_score: 0.99
   target_go_files:
   - internal/scanner/parsers/dsh.go
   resolution:
-    notes: Derive DSH latency breakdown (TTFT, throughput, LLM vs tool time).
+    notes: Ported DSH latency & throughput breakdown (TTFT, throughput, LLM vs tool
+      time, cache-hit pct) in DSHParser, models.Session, API, and InspectorSidebar
+    go_commit_sha: c6a1df3
 - sha: 9e9f2030a436a2c5de5dc14835e209e21eecca2e
   short_sha: 9e9f203
   author: Hemanth Vasi <hemanth.vasi1716@gmail.com>
