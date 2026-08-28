@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=./upstream-ledger.schema.json
 schema_version: 1.0.0
 generated_at: '2026-08-27T01:51:25.380863+00:00'
-last_updated_at: '2026-08-28T20:54:50.288437+00:00'
+last_updated_at: '2026-08-28T21:04:58.512435+00:00'
 repository:
   upstream_path: repositories/tokentelemetry
   downstream_path: repositories/tokentelemetry-go
@@ -13,13 +13,13 @@ repository:
 summary:
   total_commits: 426
   total_pull_requests: 84
-  actionable_delta_count: 3
-  ported_count: 302
+  actionable_delta_count: 2
+  ported_count: 303
   in_progress_count: 0
   deferred_count: 0
   skipped_not_applicable_count: 121
   un_triaged_count: 0
-  parity_percentage: 99.3
+  parity_percentage: 99.5
 pull_requests:
 - pr_number: 301
   title: 'Merge pull request #301 from VasiHemanth/fix/lock-version-guard'
@@ -1281,12 +1281,15 @@ commits:
   - backend/api
   - docs
   - other
-  status: actionable_delta
+  status: ported
   confidence_score: 0.99
   target_go_files:
   - internal/scanner/parsers/dsh.go
   resolution:
-    notes: Record DSH Cordis plugin lifecycle transitions via ~/.tokentelemetry/dsh_lifecycle.jsonl.
+    notes: Ported DSH Cordis plugin lifecycle ingestion from ~/.tokentelemetry/dsh_lifecycle.jsonl,
+      GET /dsh/lifecycle and GET /api/dsh/lifecycle endpoints, and InspectorSidebar
+      surfacing.
+    go_commit_sha: 9aa9105
 - sha: e95f17a0a3d389045882cb407d0228ca5f9dff4f
   short_sha: e95f17a
   author: Hemanth Vasi <hemanth.vasi1716@gmail.com>
