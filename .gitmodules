@@ -4,3 +4,6 @@
 [submodule "repositories/tokentelemetry-go"]
 	path = repositories/tokentelemetry-go
 	url = https://github.com/robin-paul/tokentelemetry-go.git
+[submodule "repositories/codeburn"]
+	path = repositories/codeburn
+	url = git@github.com:robin-paul/codeburn.git
